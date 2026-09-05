@@ -1,0 +1,103 @@
+name: Build orgclasstreasrecV4 APK
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Extract App Name from HTML Title
+      id: get_title
+      run: |
+        RAW_TITLE=$(grep -oP '(?<=<title>).*?(?=</title>)' index.html || echo "TREASURER RECORDER EVC V2.4.10")
+        CLEAN_APP_NAME=$(echo "$RAW_TITLE" | sed 's/[^a-zA-Z0-9 ]//g' | xargs)
+        CLEAN_FILE_NAME=$(echo "$CLEAN_APP_NAME" | sed 's/ /_/g')
+        if [ -z "$CLEAN_APP_NAME" ]; then
+          CLEAN_APP_NAME="TREASURER_RECORDER_EVC_V2_4_10"
+          CLEAN_FILE_NAME="TREASURER_RECORDER_EVC_V2_4_10"
+        fi
+        echo "APP_NAME=$CLEAN_APP_NAME" >> $GITHUB_ENV
+        echo "FILE_NAME=$CLEAN_FILE_NAME" >> $GITHUB_ENV
+
+    - name: Structure and Configure Capacitor
+      run: |
+        mkdir -p www
+        mv index.html style.css script.js www/ || true
+        npm init -y
+        npm install @capacitor/core @capacitor/cli @capacitor/android
+        npm install @capacitor/device @capacitor/filesystem @capacitor/share
+        npm install @capawesome/capacitor-screenshot
+        npm install @capacitor/assets --save-dev
+        echo "{\"appId\": \"com.treasurer.recorder.evc.v2_4_10\", \"appName\": \"$APP_NAME\", \"webDir\": \"www\"}" > capacitor.config.json
+        npx cap add android
+
+    - name: Obfuscate JavaScript
+      run: |
+        npm install --no-save javascript-obfuscator
+        npx javascript-obfuscator www/script.js --output www/script.js \
+          --compact true \
+          --control-flow-flattening true \
+          --control-flow-flattening-threshold 0.75 \
+          --dead-code-injection true \
+          --dead-code-injection-threshold 0.4 \
+          --self-defending true \
+          --string-array true \
+          --string-array-encoding base64 \
+          --string-array-threshold 0.75
+
+    - name: Generate App Icons
+      run: |
+        if [ -f "resources/icon.png" ]; then
+          npx capacitor-assets generate --android
+        else
+          echo "No custom icon found at resources/icon.png, using default Capacitor icon."
+        fi
+
+    - name: Sync Capacitor
+      run: npx cap sync android
+
+    - name: Full Package Isolation
+      run: |
+        sed -i 's/applicationId ".*"/applicationId "com.treasurer.recorder.evc.v2_4_10"/' android/app/build.gradle
+        sed -i 's/package=".*"/package="com.treasurer.recorder.evc.v2_4_10"/' android/app/src/main/AndroidManifest.xml
+        find android/app/src/main/ -type f -name "AndroidManifest.xml" \
+          -exec sed -i -E 's/android:authorities="[^"]*\.fileprovider"/android:authorities="com.treasurer.recorder.evc.v2_4_10.fileprovider"/g' {} +
+        find android/app/src/main/ -type f -name "MainActivity.java" \
+          -exec sed -i 's/^package .*;/package com.treasurer.recorder.evc.v2_4_10;/' {} +
+        mkdir -p android/app/src/main/java/com/treasurer/recorder/evc/v2_4_10
+        find android/app/src/main/java -name "MainActivity.java" \
+          ! -path "*/com/treasurer/recorder/evc/v2_4_10/*" \
+          -exec cp {} android/app/src/main/java/com/treasurer/recorder/evc/v2_4_10/MainActivity.java \;
+
+    - name: Set up JDK 21
+      uses: actions/setup-java@v4
+      with:
+        java-version: '21'
+        distribution: 'zulu'
+
+    - name: Build APK
+      run: |
+        cd android
+        chmod +x gradlew
+        ./gradlew clean
+        ./gradlew assembleDebug
+
+    - name: Rename APK
+      run: |
+        mv android/app/build/outputs/apk/debug/app-debug.apk ./"$FILE_NAME".apk
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: "${{ env.FILE_NAME }}-apk"
+        path: "./${{ env.FILE_NAME }}.apk"
